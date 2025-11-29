@@ -27,6 +27,7 @@ import csv
 import json
 import random
 import argparse
+from datetime import datetime
 from collections import defaultdict
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -200,6 +201,8 @@ def main():
     parser.add_argument("--category", type=str, help="Filter by category")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL,
                         help=f"Model to use as evaluator (default: {DEFAULT_MODEL})")
+    parser.add_argument("--output", type=str, default="results/runs.jsonl",
+                        help="Output file for run logs (default: results/runs.jsonl)")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -343,6 +346,49 @@ def main():
 
     print(f"\n  Note: Human inter-rater reliability is often only kappa 0.2-0.3")
     print(f"  Your evaluator: kappa {metrics['kappa']:.3f}")
+
+    # Save run to JSONL file
+    run_record = {
+        "timestamp": datetime.now().isoformat(),
+        "model": args.model,
+        "dataset": DATA_FILE,
+        "sample_size": len(data),
+        "category_filter": args.category,
+        "metrics": {
+            "accuracy": round(metrics['accuracy'], 4),
+            "accuracy_ci": [round(metrics['accuracy_ci'][0], 4), round(metrics['accuracy_ci'][1], 4)],
+            "kappa": round(metrics['kappa'], 4),
+            "precision_pass": round(metrics['precision_pass'], 4),
+            "recall_pass": round(metrics['recall_pass'], 4),
+            "f1_pass": round(metrics['f1_pass'], 4),
+            "precision_fail": round(metrics['precision_fail'], 4),
+            "recall_fail": round(metrics['recall_fail'], 4),
+            "f1_fail": round(metrics['f1_fail'], 4),
+        },
+        "confusion_matrix": {
+            "tp": metrics['tp'],
+            "fp": metrics['fp'],
+            "fn": metrics['fn'],
+            "tn": metrics['tn'],
+        },
+        "per_category": {
+            cat: {
+                "accuracy": round(calculate_metrics(cat_results)['accuracy'], 4),
+                "kappa": round(calculate_metrics(cat_results)['kappa'], 4),
+                "samples": len(cat_results),
+            }
+            for cat, cat_results in categories.items()
+        } if categories else {},
+    }
+
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+
+    # Append to JSONL file
+    with open(args.output, "a") as f:
+        f.write(json.dumps(run_record) + "\n")
+
+    print(f"\n  Run saved to: {args.output}")
 
 
 if __name__ == "__main__":
