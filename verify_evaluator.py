@@ -20,6 +20,7 @@ Usage:
 Examples:
     uv run verify_evaluator.py --sample 50 --model gpt-5-mini-2025-08-07
     uv run verify_evaluator.py --sample 50 --model gpt-5-nano-2025-08-07
+    uv run verify_evaluator.py --sample 50 --model llama3.1-8b  # Cerebras
 """
 
 import os
@@ -33,7 +34,23 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# OpenAI client for GPT models
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Cerebras client (OpenAI-compatible)
+cerebras_client = OpenAI(
+    api_key=os.getenv("CEREBRAS_API_KEY"),
+    base_url="https://api.cerebras.ai/v1"
+)
+
+# Cerebras model IDs
+CEREBRAS_MODELS = {"llama3.1-8b", "llama-3.3-70b", "gpt-oss-120b", "qwen-3-32b"}
+
+
+def is_cerebras_model(model: str) -> bool:
+    """Check if model is hosted on Cerebras."""
+    return model in CEREBRAS_MODELS
 
 # Default evaluator model (can be overridden with --model flag)
 DEFAULT_MODEL = "gpt-5-mini-2025-08-07"
@@ -71,11 +88,8 @@ def load_dataset(filepath: str) -> list[dict]:
         return [row for row in reader if row.get("label")]  # Only rows with labels
 
 
-def evaluate_response(question: str, response: str, model: str, retries: int = 3) -> tuple[str, str]:
-    """
-    Evaluate a question/response pair using the specified model.
-    Returns (verdict, reasoning).
-    """
+def evaluate_response_openai(question: str, response: str, model: str, retries: int = 3) -> tuple[str, str]:
+    """Evaluate using OpenAI Responses API with function calling."""
     prompt = f"""You are evaluating whether an AI response correctly and helpfully answers a question.
 
 Question: {question}
@@ -93,7 +107,7 @@ Use the submit_evaluation tool to provide your verdict:
 
     for attempt in range(retries):
         try:
-            result = client.responses.create(
+            result = openai_client.responses.create(
                 model=model,
                 input=[{"role": "user", "content": prompt}],
                 tools=[EVAL_TOOL],
@@ -115,6 +129,77 @@ Use the submit_evaluation tool to provide your verdict:
                 return "fail", f"Error: {e}"
 
     return "fail", "Max retries exceeded"
+
+
+def evaluate_response_cerebras(question: str, response: str, model: str, retries: int = 3) -> tuple[str, str]:
+    """Evaluate using Cerebras Chat Completions API with text parsing."""
+    prompt = f"""You are evaluating whether an AI response correctly and helpfully answers a question.
+
+Question: {question}
+
+Response: {response}
+
+Evaluate the response on these criteria:
+1. Is the response factually correct?
+2. Does it actually answer the question asked?
+3. Is it complete and not misleading?
+
+You MUST respond with EXACTLY one of these two words on the first line, followed by a brief explanation:
+- PASS (if the response is correct and helpful)
+- FAIL (if the response is wrong, incomplete, or misleading)
+
+Example format:
+PASS
+The response correctly answers the question with accurate information.
+
+Your evaluation:"""
+
+    for attempt in range(retries):
+        try:
+            result = cerebras_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=150,
+                temperature=0,
+            )
+
+            text = result.choices[0].message.content.strip()
+            first_line = text.split('\n')[0].strip().upper()
+
+            if "PASS" in first_line:
+                verdict = "pass"
+            elif "FAIL" in first_line:
+                verdict = "fail"
+            else:
+                # Try to find pass/fail anywhere in response
+                text_upper = text.upper()
+                if text_upper.startswith("PASS") or "VERDICT: PASS" in text_upper:
+                    verdict = "pass"
+                else:
+                    verdict = "fail"
+
+            reasoning = text[len(first_line):].strip() if len(text) > len(first_line) else text
+            return verdict, reasoning[:200]
+
+        except Exception as e:
+            if attempt < retries - 1:
+                import time
+                time.sleep(2 ** attempt)
+            else:
+                return "fail", f"Error: {e}"
+
+    return "fail", "Max retries exceeded"
+
+
+def evaluate_response(question: str, response: str, model: str, retries: int = 3) -> tuple[str, str]:
+    """
+    Evaluate a question/response pair using the specified model.
+    Returns (verdict, reasoning).
+    """
+    if is_cerebras_model(model):
+        return evaluate_response_cerebras(question, response, model, retries)
+    else:
+        return evaluate_response_openai(question, response, model, retries)
 
 
 def calculate_metrics(results: list[dict]) -> dict:
